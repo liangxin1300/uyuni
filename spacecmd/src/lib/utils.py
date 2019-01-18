@@ -49,7 +49,7 @@ from datetime import datetime, timedelta
 from difflib import unified_diff
 from tempfile import mkstemp
 from textwrap import wrap
-from subprocess import Popen, PIPE
+from subprocess import Popen, PIPE, call
 
 try:
     import json
@@ -813,3 +813,8 @@ def string_to_bool(input_string):
     if not isinstance(input_string, bool):
         return input_string.lower().rstrip(' ') == 'true'
     return input_string
+
+
+# execute the command and return the returncode
+def ext_cmd(cmd, shell=True):
+    return call(cmd, shell=shell)

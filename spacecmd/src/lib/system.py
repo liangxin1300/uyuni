@@ -167,6 +167,267 @@ def do_system_list(self, args, doreturn=False):
 ####################
 
 
+def help_system_reserve(self):
+    print('system_reserve: Reserve systems')
+    print('''usage: system_reserve <SYSTEMS> <WHO> [options]
+
+<WHO>:
+  -w RESREVE_WHO
+
+[options]:
+  -u RESREVE_UNTIL [default: 7d]
+  -r RESREVE_REASON''')
+
+    print('')
+    print(self.HELP_SYSTEM_OPTS)
+    print('')
+    print(self.HELP_TIME_OPTS)
+
+
+def complete_system_reserve(self, text, line, beg, end):
+    parts = line.split()
+    if parts[-1] == "-w":
+        return tab_completer(self.do_user_list('', True), text)
+    return tab_completer(self.do_system_listfree('', True), text)
+
+
+def do_system_reserve(self, args):
+    arg_parser = get_argument_parser()
+    arg_parser.add_argument('-w', '--reserve-who')
+    arg_parser.add_argument('-u', '--reserve-until')
+    arg_parser.add_argument('-r', '--reserve-reason')
+
+    (args, options) = parse_command_arguments(args, arg_parser)
+
+    if len(args) < 1:
+        self.help_system_reserve()
+        return
+
+    # use the systems listed in the SSM
+    if re.match('ssm', args[0], re.I):
+        systems = self.ssm.keys()
+    else:
+        systems = self.expand_systems(args)
+
+    # To check whether this system is really free
+    free_system_list = self.do_system_listfree('', True)
+    for system in systems:
+        system_id = self.get_system_id(system)
+        if not system_id:
+            systems.remove(system)
+            continue
+
+        if system not in free_system_list:
+            values = self.client.system.getCustomValues(self.session,
+                                                        system_id)
+            logging.error('%s is reserved by %s' % (system, values['reserve_who']))
+            return
+
+    # handle reserve_who option
+    if not options.reserve_who:
+        print('Available users')
+        print('--------------------')
+        print('\n'.join(sorted(self.do_user_list('', True))))
+        print('')
+
+        options.reserve_who = prompt_user('Reserved By:')
+        if not options.reserve_who:
+            logging.error('must assign a user')
+            return
+    user = options.reserve_who
+    # To check whether this user is valid
+    if user not in self.do_user_list('', True):
+        logging.error('%s is not a valid user' % user)
+        return
+
+    # handle reserve_until option
+    if not options.reserve_until:
+        reserve_until = prompt_user('Reserved Until [7d]:')
+        if reserve_until:
+            options.reserve_until = parse_time_input(reserve_until)
+        else:
+            options.reserve_until = parse_time_input('7d')
+    else:
+        options.reserve_until = parse_time_input(options.reserve_until)
+    until = datetime.strptime(str(options.reserve_until), '%Y%m%dT%H:%M:%S')
+
+    # handle reserve_reason option
+    if not options.reserve_reason:
+        options.reserve_reason = prompt_user('Reserved Reason:')
+
+    # contents in tuple: (key, description, value)
+    reserve_options = [("reserve_who", "system reserved by who", user),
+                       ("reserve_until", "system reserved time limit", str(until)),
+                       ("reserve_reason", "system reserved reason", options.reserve_reason)]
+
+    # Create reserve related keys if not exist
+    current_keys = self.do_custominfo_listkeys('', True)
+    for key, desc, _ in reserve_options:
+        if len(current_keys) == 0 or key not in current_keys:
+            self.client.system.custominfo.createKey(self.session, key, desc)
+
+    print('')
+    print('Reserve Systems')
+    print('-------')
+    print('\n'.join(sorted(systems)))
+    print('')
+    print('Reserved By:     %s' % options.reserve_who)
+    print('Reserved Until:  %s' % until)
+    if options.reserve_reason:
+        print('Reserved Reason: %s' % options.reserve_reason)
+
+    if not self.user_confirm('Reserve these systems [y/N]:'):
+        return
+
+    for system in systems:
+        system_id = self.get_system_id(system)
+
+        # Add reserve related custom value
+        for key, _, value in reserve_options:
+            if value:
+                self.client.system.setCustomValues(self.session,
+                                                   system_id,
+                                                   {key: value})
+
+    # setup a cron job to unreserve system when reserve expired
+    # until format here will be like 2019-03-01 17:01:10
+    time = re.split(r'[- :]', str(until))
+    minute, hour, day, month= time[4], time[3], time[2], time[1]
+
+    for system in systems:
+        crontab_line = "%s %s %s %s * spacecmd system_unreserve %s -y" %\
+                       (minute, hour, day, month, system)
+        crontab_cmd = 'echo "%s" >> /var/spool/cron/tabs/root' % crontab_line
+
+        rc = ext_cmd(crontab_cmd)
+        if rc != 0:
+            logging.error('can not create cron job: %s' % crontab_line)
+            return
+    logging.info('Successfully reserve %s' % ' '.join(systems))
+    print('')
+    logging.info('%s will be unreserved at %s' % (' '.join(systems), str(until)))
+
+####################
+
+
+def help_system_unreserve(self):
+    print('system_unreserve: Unreserve system immediately')
+    print('usage: system_unreserve <SYSTEMS>')
+    print('')
+    print(self.HELP_SYSTEM_OPTS)
+
+
+def complete_system_unreserve(self, text, line, beg, end):
+    return tab_completer(self.do_system_listreserved('', True), text)
+
+
+def do_system_unreserve(self, args):
+    arg_parser = get_argument_parser()
+    (args, options) = parse_command_arguments(args, arg_parser)
+
+    if len(args) < 1:
+        self.help_system_unreserve()
+        return
+
+    # use the systems listed in the SSM
+    if re.match('ssm', args[0], re.I):
+        systems = self.ssm.keys()
+    else:
+        systems = self.expand_systems(args)
+
+    print('')
+    print('Unreserve Systems')
+    print('-------')
+    print('\n'.join(sorted(systems)))
+
+    if not self.user_confirm('Unreserve these systems [y/N]:'):
+        return
+
+    keys = ["reserve_who", "reserve_until", "reserve_reason"]
+    for system in systems:
+        system_id = self.get_system_id(system)
+        if not system_id:
+            continue
+
+        self.client.system.deleteCustomValues(self.session,
+                                              system_id,
+                                              keys)
+
+        # remove crontab
+        remove_cron_cmd = 'crontab -l|grep -v "spacecmd system_unreserve %s -y"|crontab -' % system
+        ext_cmd(remove_cron_cmd)
+
+####################
+
+
+def help_system_listreserved(self):
+    print('system_listreserved: List systems which are reserved')
+    print('usage: system_listreserved')
+
+
+def do_system_listreserved(self, args, doreturn=False):
+    add_separator = False
+
+    reserved_systems = []
+    systems = self.get_system_names()
+    for system in systems:
+        system_id = self.get_system_id(system)
+        if not system_id:
+            continue
+
+        values = self.client.system.getCustomValues(self.session,
+                                                    system_id)
+        if "reserve_who" in values:
+            if doreturn:
+                reserved_systems.append(system)
+                continue
+
+            if add_separator:
+                print(self.SEPARATOR)
+            add_separator = True
+
+            print(system)
+            print('')
+            print('reserve_who = %s' % values['reserve_who'])
+            if "reserve_until" in values:
+                print('reserve_until = %s' % values['reserve_until'])
+            if "reserve_reason" in values:
+                print('reserve_reason = %s' % values['reserve_reason'])
+
+    if doreturn:
+        return reserved_systems
+
+####################
+
+
+def help_system_listfree(self):
+    print('system_listfree: List systems which are not reserved')
+    print('usage: system_listfree')
+
+
+def do_system_listfree(self, args, doreturn=False):
+    free_systems = []
+
+    systems = self.get_system_names()
+    for system in systems:
+        system_id = self.get_system_id(system)
+        if not system_id:
+            continue
+
+        values = self.client.system.getCustomValues(self.session,
+                                                    system_id)
+        if "reserve_who" not in values:
+            free_systems.append(system)
+
+    if doreturn:
+        return free_systems
+    else:
+        if free_systems:
+            print('\n'.join(sorted(free_systems)))
+
+####################
+
+
 def help_system_reboot(self):
     print('system_reboot: Reboot a system')
     print('''usage: system_reboot <SYSTEMS> [options])
