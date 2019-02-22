@@ -269,6 +269,19 @@ def do_system_reserve(self, args):
                                                    system_id,
                                                    {key: value})
 
+    script_contents = 'touch /tmp/111'
+    system_ids = [self.get_system_id(s) for s in systems]
+    action_id = self.client.system.scheduleScriptRun(self.session,
+                                                     system_ids,
+                                                     'root',
+                                                     'root',
+                                                     600,
+                                                     script_contents,
+                                                     options.reserve_until)
+    logging.info('Action ID: %i' % action_id)
+    scheduled = len(system_ids)
+    logging.info('Scheduled: %i system(s)' % scheduled)
+
 ####################
 
 
